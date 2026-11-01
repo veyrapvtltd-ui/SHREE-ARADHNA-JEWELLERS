@@ -95,6 +95,15 @@ export default function AdminDashboard() {
   const [inquiries, setInquiries] = useState([]);
   const [searchInquiry, setSearchInquiry] = useState('');
 
+  // Registered Customers State
+  const [customUsers, setCustomUsers] = useState([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [searchCustomer, setSearchCustomer] = useState('');
+  const [filterUserBranch, setFilterUserBranch] = useState('ALL');
+  const [editingUserId, setEditingUserId] = useState(null);
+  const [newPasswordVal, setNewPasswordVal] = useState('');
+  const [savingUserPassword, setSavingUserPassword] = useState(false);
+
   const handleLogin = (e) => {
     e.preventDefault();
     const envPasscode = import.meta.env.VITE_ADMIN_PASSCODE || 'umang@12';
@@ -167,6 +176,9 @@ export default function AdminDashboard() {
         setInquiries([]);
       }
     }
+
+    // 5. Fetch Registered Customers
+    fetchCustomUsers();
 
     setLoading(false);
   };
@@ -589,6 +601,80 @@ export default function AdminDashboard() {
     }
   };
 
+  // Fetch Registered Customers
+  const fetchCustomUsers = async () => {
+    if (!isSupabaseConfigured()) {
+      const localUsers = JSON.parse(localStorage.getItem('SAJ_users') || '[]');
+      setCustomUsers(localUsers);
+      return;
+    }
+    setLoadingUsers(true);
+    try {
+      const { data, error } = await supabase
+        .from('custom_users')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setCustomUsers(data || []);
+    } catch (err) {
+      console.warn('Error fetching custom_users:', err.message);
+      const localUsers = JSON.parse(localStorage.getItem('SAJ_users') || '[]');
+      setCustomUsers(localUsers);
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  // Reset Customer Password
+  const handleResetUserPassword = async (userId, userName) => {
+    if (!newPasswordVal.trim()) {
+      alert('Please enter a new password');
+      return;
+    }
+    setSavingUserPassword(true);
+    try {
+      if (isSupabaseConfigured()) {
+        const { error } = await supabase
+          .from('custom_users')
+          .update({ password: newPasswordVal.trim() })
+          .eq('id', userId);
+        if (error) throw error;
+      }
+      setCustomUsers(prev => prev.map(u => u.id === userId ? { ...u, password: newPasswordVal.trim() } : u));
+      const localUsers = JSON.parse(localStorage.getItem('SAJ_users') || '[]');
+      const idx = localUsers.findIndex(u => u.id === userId);
+      if (idx >= 0) {
+        localUsers[idx].password = newPasswordVal.trim();
+        localStorage.setItem('SAJ_users', JSON.stringify(localUsers));
+      }
+      alert('Password for ' + userName + ' has been updated to "' + newPasswordVal.trim() + '".');
+      setEditingUserId(null);
+      setNewPasswordVal('');
+    } catch (err) {
+      alert('Error updating password: ' + err.message);
+    } finally {
+      setSavingUserPassword(false);
+    }
+  };
+
+  // Delete Customer Account
+  const handleDeleteCustomer = async (userId, userName) => {
+    if (!window.confirm('Are you sure you want to delete customer account for "' + userName + '"?')) return;
+    try {
+      if (isSupabaseConfigured()) {
+        const { error } = await supabase.from('custom_users').delete().eq('id', userId);
+        if (error) throw error;
+      }
+      setCustomUsers(prev => prev.filter(u => u.id !== userId));
+      const localUsers = JSON.parse(localStorage.getItem('SAJ_users') || '[]');
+      localStorage.setItem('SAJ_users', JSON.stringify(localUsers.filter(u => u.id !== userId)));
+      alert('Customer account for "' + userName + '" deleted.');
+    } catch (err) {
+      alert('Error deleting customer: ' + err.message);
+    }
+  };
+
   // Delete Inquiry
   const handleDeleteInquiry = async (inqId) => {
     if (!window.confirm("Are you sure you want to delete this inquiry?")) return;
@@ -635,6 +721,16 @@ export default function AdminDashboard() {
       </div>
     );
   }
+
+  const filteredCustomers = customUsers.filter(u => {
+    const term = searchCustomer.toLowerCase().trim();
+    const matchesSearch = !term || 
+      (u.full_name && u.full_name.toLowerCase().includes(term)) ||
+      (u.phone_number && u.phone_number.includes(term)) ||
+      (u.email && u.email.toLowerCase().includes(term));
+    const matchesBranch = filterUserBranch === 'ALL' || u.preferred_branch === filterUserBranch;
+    return matchesSearch && matchesBranch;
+  });
 
   const filteredInquiries = inquiries.filter(inq => {
     if (!searchInquiry) return true;
@@ -1717,6 +1813,169 @@ export default function AdminDashboard() {
 
                     <button 
                       onClick={() => handleDeleteInquiry(inq.id)}
+                      style={{ background: 'transparent', color: '#dc3545', border: '1px solid #dc3545', padding: '5px 12px', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px' }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+        </div>
+
+        {/* 5. REGISTERED CUSTOMERS & RATE ACCESS MEMBERS */}
+        <div style={{ background: '#161616', padding: '28px', borderRadius: '8px', border: '1px solid #2a2a2a', marginTop: '30px' }}>
+          
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+            <div>
+              <h3 style={{ color: 'var(--royal-gold)', fontFamily: '"Playfair Display", serif', fontSize: '1.4rem', margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span>👥</span> Registered Customers & Rate Members
+              </h3>
+              <p style={{ color: '#888', margin: '4px 0 0', fontSize: '0.85rem' }}>
+                Total registered members: <strong style={{ color: 'var(--royal-gold)' }}>{customUsers.length}</strong> (accounts created to unlock showroom rates)
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+              <select
+                value={filterUserBranch}
+                onChange={(e) => setFilterUserBranch(e.target.value)}
+                style={{ padding: '10px 14px', background: '#0a0a0a', border: '1px solid #333', color: '#fff', outline: 'none', borderRadius: '4px' }}
+              >
+                <option value="ALL">All Branches</option>
+                <option value="Gandhidham">Gandhidham</option>
+                <option value="Adipur">Adipur</option>
+              </select>
+
+              <input 
+                type="text" 
+                placeholder="Search by name, phone, email..." 
+                value={searchCustomer}
+                onChange={(e) => setSearchCustomer(e.target.value)}
+                style={{ padding: '10px 16px', background: '#0a0a0a', border: '1px solid #333', color: '#fff', outline: 'none', borderRadius: '4px', width: '260px' }}
+              />
+
+              <button
+                type="button"
+                onClick={fetchCustomUsers}
+                style={{ padding: '10px 16px', background: '#222', border: '1px solid #444', color: '#fff', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem' }}
+                title="Refresh customer list"
+              >
+                🔄 Refresh
+              </button>
+            </div>
+          </div>
+
+          {loadingUsers ? (
+            <p style={{ color: '#888' }}>Loading customer list...</p>
+          ) : filteredCustomers.length === 0 ? (
+            <div style={{ padding: '40px 20px', textAlign: 'center', color: '#666', background: '#0d0d0d', borderRadius: '4px' }}>
+              <p style={{ fontSize: '1.05rem', margin: '0 0 8px' }}>No customers found.</p>
+              <p style={{ fontSize: '0.85rem', margin: 0 }}>Registered customers from the website will appear here in real time.</p>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '20px' }}>
+              {filteredCustomers.map(cust => (
+                <div key={cust.id} style={{ background: '#0d0d0d', padding: '20px', borderRadius: '8px', border: '1px solid #222', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+                      <h4 style={{ color: '#fff', fontSize: '1.1rem', margin: 0, fontWeight: 700 }}>
+                        {cust.full_name || 'Customer'}
+                      </h4>
+                      <span style={{ 
+                        fontSize: '0.72rem', 
+                        padding: '3px 8px', 
+                        borderRadius: '12px', 
+                        background: 'rgba(218, 165, 32, 0.15)', 
+                        color: 'var(--royal-gold)', 
+                        border: '1px solid rgba(218, 165, 32, 0.3)' 
+                      }}>
+                        {cust.preferred_branch || 'Gandhidham'}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.85rem' }}>
+                      <div style={{ color: '#aaa', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>📱</span>
+                        <strong style={{ color: '#fff' }}>{cust.phone_number || 'N/A'}</strong>
+                      </div>
+
+                      <div style={{ color: '#aaa', display: 'flex', alignItems: 'center', gap: '8px', wordBreak: 'break-all' }}>
+                        <span>✉️</span>
+                        <span>{cust.email?.endsWith('@customer.saj') ? '(No email provided)' : cust.email}</span>
+                      </div>
+
+                      <div style={{ color: '#aaa', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>🔑</span>
+                        <span>Password: <code style={{ background: '#1c1c1c', padding: '2px 6px', borderRadius: '4px', color: '#ffd700' }}>{cust.password}</code></span>
+                      </div>
+
+                      <div style={{ color: '#666', fontSize: '0.75rem', marginTop: '4px' }}>
+                        Registered: {cust.created_at ? new Date(cust.created_at).toLocaleString('en-IN') : 'N/A'}
+                      </div>
+                    </div>
+
+                    {/* Inline Reset Password Form */}
+                    {editingUserId === cust.id && (
+                      <div style={{ marginTop: '14px', padding: '12px', background: '#181818', borderRadius: '6px', border: '1px solid #333' }}>
+                        <label style={{ display: 'block', fontSize: '0.78rem', color: '#ccc', marginBottom: '6px' }}>
+                          Set New Password for {cust.full_name}:
+                        </label>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <input
+                            type="text"
+                            placeholder="New password"
+                            value={newPasswordVal}
+                            onChange={(e) => setNewPasswordVal(e.target.value)}
+                            style={{ flex: 1, padding: '7px 10px', background: '#0a0a0a', border: '1px solid #444', color: '#fff', borderRadius: '4px', fontSize: '0.85rem' }}
+                          />
+                          <button
+                            type="button"
+                            disabled={savingUserPassword}
+                            onClick={() => handleResetUserPassword(cust.id, cust.full_name || 'Customer')}
+                            style={{ padding: '7px 12px', background: 'var(--royal-gold)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setEditingUserId(null); setNewPasswordVal(''); }}
+                            style={{ padding: '7px 10px', background: '#333', color: '#aaa', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '18px', paddingTop: '14px', borderTop: '1px solid #222', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <a 
+                        href={'https://wa.me/91' + String(cust.phone_number || '').replace(/\D/g, '').slice(-10) + '?text=Hello%20' + encodeURIComponent(cust.full_name || 'Customer') + ',%20greetings%20from%20SHREE%20ARADHNA%20JEWELLERS!'}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ padding: '6px 12px', background: '#25D366', color: '#fff', textDecoration: 'none', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold' }}
+                      >
+                        WhatsApp
+                      </a>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingUserId(editingUserId === cust.id ? null : cust.id);
+                          setNewPasswordVal('');
+                        }}
+                        style={{ padding: '5px 10px', background: 'transparent', color: 'var(--royal-gold)', border: '1px solid var(--royal-gold)', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: '600' }}
+                      >
+                        Reset Password
+                      </button>
+                    </div>
+
+                    <button 
+                      onClick={() => handleDeleteCustomer(cust.id, cust.full_name || 'Customer')}
                       style={{ background: 'transparent', color: '#dc3545', border: '1px solid #dc3545', padding: '5px 12px', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px' }}
                     >
                       Delete

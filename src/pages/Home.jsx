@@ -17,7 +17,7 @@ import heic2any from 'heic2any';
 import { 
   Menu, X, Phone, MapPin, Clock, 
   ShieldCheck, Heart, Award, Share2, Lock, User, LogIn, CheckCircle,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, Eye, EyeOff, MessageCircle
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { 
@@ -238,6 +238,10 @@ export default function Home() {
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState(null);
+  const [authShowPassword, setAuthShowPassword] = useState(false);
+  const [authSuccessMessage, setAuthSuccessMessage] = useState(null);
+  const [authPrefillIdent, setAuthPrefillIdent] = useState('');
+  const [authAccountExistsInfo, setAuthAccountExistsInfo] = useState(null);
 
   const handleUserLogout = (e) => {
     if (e) e.preventDefault();
@@ -270,53 +274,118 @@ export default function Home() {
     e.preventDefault();
     setAuthLoading(true);
     setAuthError(null);
+    setAuthAccountExistsInfo(null);
 
     const form = e.target;
 
     try {
       if (authMode === 'signup') {
-        const fullName = form.authName.value.trim();
-        const phone = form.authPhone.value.trim();
-        const emailVal = form.authEmail.value.trim().toLowerCase();
-        const passwordVal = form.authPassword.value;
+        const fullName = (form.authName?.value || '').trim();
+        const rawPhone = (form.authPhone?.value || '').trim();
+        const rawEmail = (form.authEmail?.value || '').trim().toLowerCase();
+        const passwordVal = (form.authPassword?.value || '').trim();
         const branchVal = form.authBranch ? form.authBranch.value : 'Gandhidham';
 
-        if (!fullName || !phone || !emailVal || !passwordVal) {
-          throw new Error('Please fill in all required fields.');
+        // 1. Full name check
+        if (!fullName || fullName.length < 2) {
+          throw new Error('Please enter your full name.');
+        }
+
+        // 2. Mobile number normalization & check (strictly 10 digits)
+        const digitsOnly = rawPhone.replace(/\D/g, '');
+        const cleanPhone = digitsOnly.length > 10 && (digitsOnly.startsWith('91') || digitsOnly.startsWith('0'))
+          ? digitsOnly.slice(-10)
+          : digitsOnly;
+
+        if (!cleanPhone || cleanPhone.length !== 10) {
+          throw new Error('Please enter a valid 10-digit mobile number (e.g. 9825012345).');
+        }
+
+        // 3. Email is OPTIONAL: if provided, validate; if blank, auto-assign clean unique email
+        let emailVal = rawEmail;
+        if (emailVal) {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal)) {
+            throw new Error('Please enter a valid email address (or leave email blank).');
+          }
+        } else {
+          emailVal = `${cleanPhone}@customer.saj`;
+        }
+
+        // 4. Password validation
+        if (!passwordVal || passwordVal.length < 3) {
+          throw new Error('Please enter a password of at least 3 characters.');
         }
 
         let userRecord = null;
 
-        // 1. Direct Supabase Normal Database Table 'custom_users'
+        // 5. Normal Supabase Database Table 'custom_users'
         if (isSupabaseConfigured()) {
           try {
-            const { data: existingUser } = await supabase
+            // Check if user already exists
+            const { data: existingList, error: queryErr } = await supabase
               .from('custom_users')
-              .select('id, email, phone_number')
-              .or(`email.eq.${emailVal},phone_number.eq.${phone}`)
-              .maybeSingle();
+              .select('*')
+              .or(`email.eq.${emailVal},phone_number.eq.${cleanPhone},phone_number.eq.${rawPhone}`);
 
-            if (existingUser) {
-              throw new Error('An account with this email or phone number already exists.');
+            if (queryErr) console.warn('Supabase check user error:', queryErr);
+
+            // Also check digit matching in case phone was stored with spaces (e.g. '96388 88170')
+            let existingUser = (existingList || []).find(u => {
+              const uDigits = (u.phone_number || '').replace(/\D/g, '');
+              return (
+                uDigits.endsWith(cleanPhone) || 
+                (u.email && u.email.toLowerCase() === emailVal) ||
+                (u.email && u.email.toLowerCase() === `${cleanPhone}@customer.saj`)
+              );
+            });
+
+            // If not found in partial list, check all users by digit matching to be 100% accurate
+            if (!existingUser) {
+              const { data: allUsers } = await supabase.from('custom_users').select('*');
+              existingUser = (allUsers || []).find(u => {
+                const uDigits = (u.phone_number || '').replace(/\D/g, '');
+                return uDigits.endsWith(cleanPhone) || (u.email && u.email.toLowerCase() === emailVal);
+              });
             }
 
-            const { data: newUser, error: insertError } = await supabase
-              .from('custom_users')
-              .insert([{
-                full_name: fullName,
-                phone_number: phone,
-                email: emailVal,
-                password: passwordVal,
-                preferred_branch: branchVal
-              }])
-              .select()
-              .single();
+            if (existingUser) {
+              // SMART FEATURE: If password matches existing account, auto-login immediately!
+              if (existingUser.password === passwordVal) {
+                userRecord = existingUser;
+              } else {
+                setAuthAccountExistsInfo({
+                  phone: cleanPhone,
+                  email: existingUser.email
+                });
+                throw new Error(`An account with mobile number ${cleanPhone} is already registered.`);
+              }
+            }
 
-            if (insertError) throw insertError;
-            userRecord = newUser;
+            if (!userRecord) {
+              const { data: newUser, error: insertError } = await supabase
+                .from('custom_users')
+                .insert([{
+                  full_name: fullName,
+                  phone_number: cleanPhone,
+                  email: emailVal,
+                  password: passwordVal,
+                  preferred_branch: branchVal
+                }])
+                .select()
+                .single();
+
+              if (insertError) {
+                if (insertError.code === '23505' || (insertError.message && insertError.message.includes('unique'))) {
+                  setAuthAccountExistsInfo({ phone: cleanPhone });
+                  throw new Error(`An account with mobile number ${cleanPhone} is already registered.`);
+                }
+                throw insertError;
+              }
+              userRecord = newUser;
+            }
           } catch (dbErr) {
-            console.warn('Supabase signup fallback:', dbErr.message);
-            if (dbErr.message.includes('already exists')) {
+            console.warn('Supabase signup handling:', dbErr.message);
+            if (dbErr.message.includes('already registered') || dbErr.message.includes('already exists')) {
               throw dbErr;
             }
           }
@@ -325,18 +394,29 @@ export default function Home() {
         // LocalStorage fallback if offline or table pending
         if (!userRecord) {
           const localUsers = JSON.parse(localStorage.getItem('SAJ_users') || '[]');
-          if (localUsers.some(u => u.email.toLowerCase() === emailVal || u.phone_number === phone)) {
-            throw new Error('An account with this email or phone number already exists.');
+          const found = localUsers.find(u => {
+            const uDigits = (u.phone_number || '').replace(/\D/g, '');
+            return uDigits.endsWith(cleanPhone) || (u.email && u.email.toLowerCase() === emailVal);
+          });
+
+          if (found) {
+            if (found.password === passwordVal) {
+              userRecord = found;
+            } else {
+              setAuthAccountExistsInfo({ phone: cleanPhone });
+              throw new Error(`An account with mobile number ${cleanPhone} is already registered.`);
+            }
+          } else {
+            userRecord = {
+              id: 'user_' + Date.now(),
+              full_name: fullName,
+              phone_number: cleanPhone,
+              email: emailVal,
+              password: passwordVal,
+              preferred_branch: branchVal,
+              created_at: new Date().toISOString()
+            };
           }
-          userRecord = {
-            id: 'user_' + Date.now(),
-            full_name: fullName,
-            phone_number: phone,
-            email: emailVal,
-            password: passwordVal,
-            preferred_branch: branchVal,
-            created_at: new Date().toISOString()
-          };
         }
 
         const localUsers = JSON.parse(localStorage.getItem('SAJ_users') || '[]');
@@ -353,30 +433,51 @@ export default function Home() {
         setIsUserLoggedIn(true);
         setCurrentUser(userRecord);
         setIsAuthModalOpen(false);
+        setAuthSuccessMessage(`Welcome ${userRecord.full_name || 'Member'}! Today's rates are unlocked.`);
+        setTimeout(() => setAuthSuccessMessage(null), 5000);
       } else {
         // LOGIN
-        const identifier = form.authIdentifier.value.trim().toLowerCase();
-        const passwordVal = form.authPassword.value;
+        const rawIdent = (form.authIdentifier?.value || '').trim();
+        const cleanIdent = rawIdent.toLowerCase();
+        const passwordVal = (form.authPassword?.value || '').trim();
 
-        if (!identifier || !passwordVal) {
-          throw new Error('Please enter your email or phone number, and password.');
+        if (!rawIdent || !passwordVal) {
+          throw new Error('Please enter your mobile number or email, and password.');
         }
+
+        const identDigits = rawIdent.replace(/\D/g, '');
+        const cleanPhoneIdent = identDigits.length > 10 && (identDigits.startsWith('91') || identDigits.startsWith('0'))
+          ? identDigits.slice(-10)
+          : identDigits;
 
         let userRecord = null;
 
         // 1. Normal Supabase Database Table 'custom_users'
         if (isSupabaseConfigured()) {
           try {
-            const { data: userProfile, error: loginError } = await supabase
-              .from('custom_users')
-              .select('*')
-              .or(`email.eq.${identifier},phone_number.eq.${identifier}`)
-              .eq('password', passwordVal)
-              .maybeSingle();
+            let query = supabase.from('custom_users').select('*');
+            if (cleanPhoneIdent && cleanPhoneIdent.length === 10) {
+              query = query.or(`email.eq.${cleanIdent},phone_number.eq.${cleanIdent},phone_number.eq.${cleanPhoneIdent},email.eq.${cleanPhoneIdent}@customer.saj`);
+            } else {
+              query = query.or(`email.eq.${cleanIdent},phone_number.eq.${cleanIdent}`);
+            }
 
-            if (loginError) throw loginError;
-            if (userProfile) {
-              userRecord = userProfile;
+            const { data: matchedUsers, error: loginError } = await query;
+            if (loginError) console.warn('Supabase login query error:', loginError);
+
+            if (matchedUsers && matchedUsers.length > 0) {
+              const matched = matchedUsers.find(u => u.password === passwordVal);
+              if (matched) userRecord = matched;
+            }
+
+            // Fallback: If not found and input was 10-digit phone, check all users by digit matching
+            if (!userRecord && cleanPhoneIdent && cleanPhoneIdent.length === 10) {
+              const { data: allUsers } = await supabase.from('custom_users').select('*');
+              const foundUser = (allUsers || []).find(u => {
+                const uDigits = (u.phone_number || '').replace(/\D/g, '');
+                return uDigits.endsWith(cleanPhoneIdent) && u.password === passwordVal;
+              });
+              if (foundUser) userRecord = foundUser;
             }
           } catch (dbErr) {
             console.warn('Supabase login fallback:', dbErr.message);
@@ -386,17 +487,22 @@ export default function Home() {
         // LocalStorage fallback
         if (!userRecord) {
           const localUsers = JSON.parse(localStorage.getItem('SAJ_users') || '[]');
-          const found = localUsers.find(u => 
-            (u.email.toLowerCase() === identifier || u.phone_number === identifier) && 
-            u.password === passwordVal
-          );
+          const found = localUsers.find(u => {
+            const uDigits = (u.phone_number || '').replace(/\D/g, '');
+            const matchIdent = (
+              u.email.toLowerCase() === cleanIdent || 
+              u.phone_number === cleanIdent || 
+              (cleanPhoneIdent && uDigits.endsWith(cleanPhoneIdent))
+            );
+            return matchIdent && u.password === passwordVal;
+          });
           if (found) {
             userRecord = found;
           }
         }
 
         if (!userRecord) {
-          throw new Error('Invalid email/phone or password. Please try again.');
+          throw new Error('Invalid mobile number/email or password. Please check your credentials or contact WhatsApp support.');
         }
 
         // Save login info permanently in localStorage
@@ -407,6 +513,8 @@ export default function Home() {
         setIsUserLoggedIn(true);
         setCurrentUser(userRecord);
         setIsAuthModalOpen(false);
+        setAuthSuccessMessage(`Welcome back, ${userRecord.full_name || 'Member'}! Today's rates are unlocked.`);
+        setTimeout(() => setAuthSuccessMessage(null), 5000);
       }
     } catch (err) {
       setAuthError(err.message);
@@ -4367,6 +4475,31 @@ export default function Home() {
       )}
 
 
+      {/* Rate Unlock Success Notification Toast */}
+      {authSuccessMessage && (
+        <div style={{
+          position: 'fixed',
+          top: '20px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 100000,
+          background: 'linear-gradient(135deg, #15803d 0%, #166534 100%)',
+          color: '#ffffff',
+          padding: '12px 24px',
+          borderRadius: '50px',
+          boxShadow: '0 10px 30px rgba(0,0,0,0.25)',
+          fontSize: '13px',
+          fontWeight: '700',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          animation: 'animaticScaleIn 0.3s ease'
+        }}>
+          <CheckCircle style={{ width: '18px', height: '18px', color: '#86efac' }} />
+          <span>{authSuccessMessage}</span>
+        </div>
+      )}
+
       {/* Rate Unlock Auth Modal (Normal Supabase Database Table 'custom_users') */}
       {isAuthModalOpen && (
         <div 
@@ -4383,7 +4516,11 @@ export default function Home() {
             padding: '16px'
           }}
           onClick={(e) => {
-            if (e.target === e.currentTarget) setIsAuthModalOpen(false);
+            if (e.target === e.currentTarget) {
+              setIsAuthModalOpen(false);
+              setAuthError(null);
+              setAuthAccountExistsInfo(null);
+            }
           }}
         >
           <div style={{
@@ -4402,7 +4539,11 @@ export default function Home() {
           }}>
             {/* Close Button */}
             <button
-              onClick={() => setIsAuthModalOpen(false)}
+              onClick={() => {
+                setIsAuthModalOpen(false);
+                setAuthError(null);
+                setAuthAccountExistsInfo(null);
+              }}
               style={{
                 position: 'absolute',
                 top: '16px',
@@ -4424,7 +4565,7 @@ export default function Home() {
             </button>
 
             {/* Header */}
-            <div style={{ textAlign: 'center', marginBottom: '22px' }}>
+            <div style={{ textAlign: 'center', marginBottom: '20px' }}>
               <div style={{
                 width: '46px',
                 height: '46px',
@@ -4446,12 +4587,12 @@ export default function Home() {
                 letterSpacing: '1px',
                 textTransform: 'uppercase'
               }}>
-                {authMode === 'signup' ? 'Create Free Account' : 'Welcome Back'}
+                {authMode === 'signup' ? 'Create Free Member Account' : 'Member Login'}
               </h3>
-              <p style={{ fontSize: '12px', color: 'var(--text-gray)', margin: 0 }}>
+              <p style={{ fontSize: '12px', color: 'var(--text-gray)', margin: 0, lineHeight: 1.5 }}>
                 {authMode === 'signup' 
-                  ? "Sign up to unlock today's gold & silver rates and special member benefits."
-                  : "Login with your email or mobile number to view today's certified rates."}
+                  ? "Sign up with your mobile number to instantly unlock today's certified gold & silver showroom rates."
+                  : "Login with your mobile number or email to view today's certified showroom rates."}
               </p>
             </div>
 
@@ -4461,11 +4602,11 @@ export default function Home() {
               background: '#f4f1ea',
               borderRadius: '8px',
               padding: '4px',
-              marginBottom: '20px'
+              marginBottom: '18px'
             }}>
               <button
                 type="button"
-                onClick={() => { setAuthMode('login'); setAuthError(null); }}
+                onClick={() => { setAuthMode('login'); setAuthError(null); setAuthAccountExistsInfo(null); }}
                 style={{
                   flex: 1,
                   padding: '9px',
@@ -4483,7 +4624,7 @@ export default function Home() {
               </button>
               <button
                 type="button"
-                onClick={() => { setAuthMode('signup'); setAuthError(null); }}
+                onClick={() => { setAuthMode('signup'); setAuthError(null); setAuthAccountExistsInfo(null); }}
                 style={{
                   flex: 1,
                   padding: '9px',
@@ -4501,18 +4642,70 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Error Message */}
+            {/* Error Message & Account Exists Action Helper */}
             {authError && (
               <div style={{
-                padding: '10px 14px',
+                padding: '12px 14px',
                 background: '#fef2f2',
                 border: '1px solid #fecaca',
                 color: '#b91c1c',
-                borderRadius: '6px',
+                borderRadius: '8px',
                 fontSize: '12px',
-                marginBottom: '16px'
+                marginBottom: '16px',
+                lineHeight: 1.5
               }}>
-                {authError}
+                <div style={{ fontWeight: 600, marginBottom: authAccountExistsInfo ? '10px' : '0' }}>
+                  {authError}
+                </div>
+
+                {authAccountExistsInfo && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode('login');
+                        setAuthPrefillIdent(authAccountExistsInfo.phone || '');
+                        setAuthError(null);
+                        setAuthAccountExistsInfo(null);
+                      }}
+                      style={{
+                        padding: '9px 12px',
+                        background: 'var(--royal-gold)',
+                        color: '#ffffff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: '700',
+                        cursor: 'pointer',
+                        textAlign: 'center'
+                      }}
+                    >
+                      🔑 Switch to Login with this Number
+                    </button>
+                    <a
+                      href={`https://wa.me/919638888170?text=${encodeURIComponent(`Hello Shree Aradhna Jewellers, I need help logging in with mobile number ${authAccountExistsInfo.phone} to view today's rates.`)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        padding: '9px 12px',
+                        background: '#25D366',
+                        color: '#ffffff',
+                        textDecoration: 'none',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: '700',
+                        textAlign: 'center',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '6px'
+                      }}
+                    >
+                      <MessageCircle style={{ width: '14px', height: '14px' }} />
+                      Forgot Password? WhatsApp Support
+                    </a>
+                  </div>
+                )}
               </div>
             )}
 
@@ -4528,6 +4721,7 @@ export default function Home() {
                       name="authName"
                       type="text"
                       required
+                      autoComplete="name"
                       placeholder="e.g. Rahul Sharma"
                       style={{
                         width: '100%',
@@ -4543,13 +4737,17 @@ export default function Home() {
 
                   <div style={{ marginBottom: '14px' }}>
                     <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-dark)', marginBottom: '6px' }}>
-                      Mobile Number *
+                      Mobile Number * <span style={{ fontSize: '10px', color: '#16a34a', fontWeight: 'normal' }}>(10 Digits)</span>
                     </label>
                     <input
                       name="authPhone"
                       type="tel"
                       required
-                      placeholder="10-digit mobile number"
+                      inputMode="tel"
+                      autoComplete="tel"
+                      maxLength={14}
+                      defaultValue={authPrefillIdent}
+                      placeholder="e.g. 9825012345"
                       style={{
                         width: '100%',
                         padding: '11px 14px',
@@ -4563,14 +4761,17 @@ export default function Home() {
                   </div>
 
                   <div style={{ marginBottom: '14px' }}>
-                    <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-dark)', marginBottom: '6px' }}>
-                      Email Address *
-                    </label>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                      <label style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-dark)' }}>
+                        Email Address
+                      </label>
+                      <span style={{ fontSize: '10px', color: '#6b7280' }}>Optional</span>
+                    </div>
                     <input
                       name="authEmail"
                       type="email"
-                      required
-                      placeholder="name@example.com"
+                      autoComplete="email"
+                      placeholder="Optional (or leave blank)"
                       style={{
                         width: '100%',
                         padding: '11px 14px',
@@ -4585,23 +4786,46 @@ export default function Home() {
 
                   <div style={{ marginBottom: '14px' }}>
                     <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-dark)', marginBottom: '6px' }}>
-                      Password *
+                      Create Password *
                     </label>
-                    <input
-                      name="authPassword"
-                      type="password"
-                      required
-                      placeholder="Create a secure password"
-                      style={{
-                        width: '100%',
-                        padding: '11px 14px',
-                        borderRadius: '6px',
-                        border: '1px solid #d1d5db',
-                        fontSize: '13px',
-                        boxSizing: 'border-box',
-                        outline: 'none'
-                      }}
-                    />
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        name="authPassword"
+                        type={authShowPassword ? 'text' : 'password'}
+                        required
+                        autoComplete="new-password"
+                        placeholder="Create a password"
+                        style={{
+                          width: '100%',
+                          padding: '11px 40px 11px 14px',
+                          borderRadius: '6px',
+                          border: '1px solid #d1d5db',
+                          fontSize: '13px',
+                          boxSizing: 'border-box',
+                          outline: 'none'
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setAuthShowPassword(prev => !prev)}
+                        style={{
+                          position: 'absolute',
+                          right: '10px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          background: 'none',
+                          border: 'none',
+                          color: '#6b7280',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: 0
+                        }}
+                        title={authShowPassword ? "Hide password" : "Show password"}
+                      >
+                        {authShowPassword ? <EyeOff style={{ width: '18px', height: '18px' }} /> : <Eye style={{ width: '18px', height: '18px' }} />}
+                      </button>
+                    </div>
                   </div>
 
                   <div style={{ marginBottom: '18px' }}>
@@ -4631,13 +4855,15 @@ export default function Home() {
                 <>
                   <div style={{ marginBottom: '14px' }}>
                     <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-dark)', marginBottom: '6px' }}>
-                      Email Address or Mobile Number *
+                      Mobile Number or Email *
                     </label>
                     <input
                       name="authIdentifier"
                       type="text"
                       required
-                      placeholder="Enter email or mobile number"
+                      autoComplete="username"
+                      defaultValue={authPrefillIdent}
+                      placeholder="10-digit mobile number or email"
                       style={{
                         width: '100%',
                         padding: '11px 14px',
@@ -4650,25 +4876,59 @@ export default function Home() {
                     />
                   </div>
 
-                  <div style={{ marginBottom: '18px' }}>
+                  <div style={{ marginBottom: '8px' }}>
                     <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-dark)', marginBottom: '6px' }}>
                       Password *
                     </label>
-                    <input
-                      name="authPassword"
-                      type="password"
-                      required
-                      placeholder="Enter your password"
-                      style={{
-                        width: '100%',
-                        padding: '11px 14px',
-                        borderRadius: '6px',
-                        border: '1px solid #d1d5db',
-                        fontSize: '13px',
-                        boxSizing: 'border-box',
-                        outline: 'none'
-                      }}
-                    />
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        name="authPassword"
+                        type={authShowPassword ? 'text' : 'password'}
+                        required
+                        autoComplete="current-password"
+                        placeholder="Enter your password"
+                        style={{
+                          width: '100%',
+                          padding: '11px 40px 11px 14px',
+                          borderRadius: '6px',
+                          border: '1px solid #d1d5db',
+                          fontSize: '13px',
+                          boxSizing: 'border-box',
+                          outline: 'none'
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setAuthShowPassword(prev => !prev)}
+                        style={{
+                          position: 'absolute',
+                          right: '10px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          background: 'none',
+                          border: 'none',
+                          color: '#6b7280',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          padding: 0
+                        }}
+                        title={authShowPassword ? "Hide password" : "Show password"}
+                      >
+                        {authShowPassword ? <EyeOff style={{ width: '18px', height: '18px' }} /> : <Eye style={{ width: '18px', height: '18px' }} />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div style={{ textAlign: 'right', marginBottom: '18px' }}>
+                    <a
+                      href="https://wa.me/919638888170?text=Hello%20Shree%20Aradhna%20Jewellers,%20I%20forgot%20my%20password%20to%20view%20today%27s%20rates."
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ fontSize: '11px', color: 'var(--royal-gold)', textDecoration: 'none', fontWeight: '600' }}
+                    >
+                      Forgot Password? WhatsApp Support
+                    </a>
                   </div>
                 </>
               )}
@@ -4702,7 +4962,7 @@ export default function Home() {
                   Already have an account?{' '}
                   <button
                     type="button"
-                    onClick={() => { setAuthMode('login'); setAuthError(null); }}
+                    onClick={() => { setAuthMode('login'); setAuthError(null); setAuthAccountExistsInfo(null); }}
                     style={{ background: 'none', border: 'none', color: 'var(--royal-gold)', fontWeight: '700', cursor: 'pointer', padding: 0 }}
                   >
                     Login here
@@ -4713,7 +4973,7 @@ export default function Home() {
                   New customer?{' '}
                   <button
                     type="button"
-                    onClick={() => { setAuthMode('signup'); setAuthError(null); }}
+                    onClick={() => { setAuthMode('signup'); setAuthError(null); setAuthAccountExistsInfo(null); }}
                     style={{ background: 'none', border: 'none', color: 'var(--royal-gold)', fontWeight: '700', cursor: 'pointer', padding: 0 }}
                   >
                     Sign Up Free
